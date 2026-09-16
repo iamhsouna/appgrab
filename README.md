@@ -38,24 +38,38 @@ AppGrab installs whatever is missing on first run. Nothing else to do.
 
 ## Install
 
-Clone and run — that's it:
+### One-line installer (recommended)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/iamhsouna/appgrab/main/install.sh | bash
+```
+
+Then run `appgrab --help`. The installer prefers an isolated [`uv`](https://docs.astral.sh/uv/)
+tool install, falls back to `pipx`, then to dropping the single script in
+`~/.local/bin`.
+
+> **Private repo?** `raw.githubusercontent.com` needs a token. Use the `uv` one-liner
+> below instead (Git uses your stored credentials), or run
+> `gh api repos/iamhsouna/appgrab/contents/install.sh -H "Accept: application/vnd.github.raw" | bash`.
+
+### `uv` one-liner
+
+```bash
+uv tool install "git+https://github.com/iamhsouna/appgrab"
+```
+
+### Manual / from a clone
 
 ```bash
 git clone https://github.com/iamhsouna/appgrab.git
 cd appgrab
-./appgrab.py --help
+./install.sh          # or: ./appgrab.py --help
 ```
 
-Prefer isolated execution with `uv` (no venv to manage):
+Run it without installing anything (uses `uv` for an ephemeral env):
 
 ```bash
 uv run appgrab.py --help
-```
-
-Make it a global command:
-
-```bash
-uv tool install ./appgrab.py   # or: pipx install ./appgrab.py
 ```
 
 ## Usage

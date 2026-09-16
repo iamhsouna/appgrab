@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "appgrab"
+version = "1.0.0"
+description = "Search and bulk-download Android APKs (apkeep) and iOS IPAs (ipatool) from one CLI"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Hsouna Zinoubi" }]
+keywords = ["apk", "ipa", "android", "ios", "apkeep", "ipatool", "app-store", "google-play"]
+dependencies = ["google-play-scraper"]
+
+[project.urls]
+Homepage = "https://github.com/iamhsouna/appgrab"
+Repository = "https://github.com/iamhsouna/appgrab"
+
+[project.scripts]
+appgrab = "appgrab:main"
+
+[tool.setuptools]
+py-modules = ["appgrab"]
