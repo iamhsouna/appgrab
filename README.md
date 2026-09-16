@@ -22,7 +22,8 @@ Download all 10 apps to '.'? [y/N] y
 
 - **Two platforms, one tool** — Android (`.apk`) and iOS (`.ipa`) with a single `-p android|ios` switch.
 - **Search or direct download** — search a store and bulk-grab every result, or download a single app by id.
-- **Zero setup** — dependencies (`google-play-scraper`, `apkeep`, `ipatool`) are installed automatically.
+- **Cross-platform** — works on **macOS**, **Ubuntu/Debian**, **Arch Linux** (and other `brew` / `apt` / `pacman` / `dnf` / `zypper` distros).
+- **Zero setup** — missing dependencies are detected and installed on first run *with your permission*.
 - **`uv` or `venv`** — uses [PEP 723](https://peps.python.org/pep-0723/) inline metadata with `uv`, and falls back to a private virtualenv if `uv` isn't installed.
 - **No auth for free sources** — Android defaults to APKPure; iOS only needs your own App Store account login.
 - **Pretty output** — colored, script-friendly progress.
@@ -30,11 +31,32 @@ Download all 10 apps to '.'? [y/N] y
 ## Requirements
 
 - Python 3.9+
-- [`uv`](https://docs.astral.sh/uv/) *(recommended, optional)*
-- For Android: [`apkeep`](https://github.com/EFForg/apkeep) — auto-installed via `cargo`/`brew`
-- For iOS: [`ipatool`](https://github.com/majd/ipatool) — auto-installed via `brew`/`go`
+- [`uv`](https://docs.astral.sh/uv/) *(recommended, optional — otherwise a venv is created)*
 
-AppGrab installs whatever is missing on first run. Nothing else to do.
+Everything else is installed on demand. AppGrab always asks before installing
+anything, and picks a strategy that works on your OS:
+
+| Dependency | Needed for | How AppGrab installs it |
+| --- | --- | --- |
+| `google-play-scraper` | Android search | isolated `uv` env, else a private venv |
+| [`apkeep`](https://github.com/EFForg/apkeep) | Android downloads | prebuilt binary (Linux), Homebrew, or `cargo install apkeep` |
+| [`ipatool`](https://github.com/majd/ipatool) | iOS | prebuilt binary (macOS/Linux), Homebrew, or `go install` |
+| Rust/cargo | only if building `apkeep` | `brew` / `apt` / `pacman` / `dnf`, else rustup |
+| Go | only if building `ipatool` | `brew` / `apt` / `pacman` / `dnf` |
+
+Prebuilt binaries are downloaded straight from the official GitHub releases
+(with SHA-256 verification when the project publishes one), so most users never
+need a compiler.
+
+### Supported platforms
+
+- **macOS** (Intel & Apple Silicon)
+- **Ubuntu / Debian** (and derivatives)
+- **Arch Linux** (and derivatives)
+- Other Linux with `dnf`/`zypper`/Homebrew
+
+Pass `-y` / `--yes` (or set `APPGRAB_YES=1`) to auto-accept every prompt — handy
+for unattended installs and CI.
 
 ## Install
 
@@ -91,7 +113,7 @@ Common options:
 | `-o, --output DIR` | Output directory (default: `.`) |
 | `-r, --parallel N` | Parallel downloads (default: `4`) |
 | `--limit N` | Max search results (default: `10`) |
-| `-y, --yes` | Skip the confirmation prompt |
+| `-y, --yes` | Auto-accept install/download prompts (`APPGRAB_YES=1` also works) |
 | `--dry-run` | List results without downloading |
 | `-s, --source` | Android source: `apk-pure`, `google-play`, `f-droid`, `huawei-app-gallery` |
 | `--purchase / --no-purchase` | iOS: acquire a license if required (default: on) |
@@ -137,9 +159,16 @@ Downloads are saved as `{bundleID}_{appID}_{version}.ipa`.
 ## How it works
 
 1. `appgrab.py` carries inline [PEP 723](https://peps.python.org/pep-0723/) metadata listing its Python dependency.
-2. If `google-play-scraper` is missing, the script re-executes itself under `uv run` (preferred) or a private venv at `~/.cache/appgrab/venv`.
-3. Missing native tools are installed on demand: `apkeep` (Android) via `cargo`/`brew`, `ipatool` (iOS) via `brew`/`go`.
-4. Search + download is delegated to the native tool, with JSON output parsed by AppGrab.
+2. On first Android search, if `google-play-scraper` is missing the script asks,
+   then re-executes itself under `uv run` (preferred) or a private venv at
+   `~/.cache/appgrab/venv`.
+3. Missing native tools are detected by OS/architecture. AppGrab asks before
+   installing anything, then tries, in order: a prebuilt GitHub release binary →
+   the system package manager (`brew` / `apt` / `pacman` / `dnf` / `zypper`) →
+   building from source with `cargo` / `go` (installing that toolchain too, if you agree).
+4. Installed binaries land in `~/.local/bin` (or `~/.cargo/bin` / `~/go/bin`),
+   which AppGrab adds to `PATH` for the current session.
+5. Search + download is delegated to the native tool, with JSON output parsed by AppGrab.
 
 Config for the Google Play source is stored at `~/.config/appgrab/config.json` (mode `0600`).
 

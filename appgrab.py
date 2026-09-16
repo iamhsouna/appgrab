@@ -13,12 +13,16 @@ a private venv as fallback); Android defaults to the free APKPure source.
 """
 
 import argparse
+import hashlib
 import json
 import os
+import platform
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -28,6 +32,9 @@ CONFIG_FILE = CONFIG_DIR / "config.json"
 SCRIPT_PATH = Path(__file__).resolve()
 BOOTSTRAP_ENV = "_APPGRAB_BOOTSTRAPPED"
 VENV_DIR = Path(os.environ.get("APPGRAB_VENV", Path.home() / ".cache" / "appgrab" / "venv"))
+
+LOCAL_BIN = Path.home() / ".local" / "bin"
+ASSUME_YES = os.environ.get("APPGRAB_YES", "").lower() in ("1", "true", "yes")
 
 
 # ---------- Colors ----------
@@ -48,12 +55,203 @@ def run(cmd, **kwargs):
         return False
 
 
+def confirm(question, default=True):
+    """Ask the user for confirmation before installing something."""
+    if ASSUME_YES:
+        info(f"{question} (auto-yes)")
+        return True
+    if not sys.stdin.isatty():
+        info(f"{question} (non-interactive: yes)")
+        return True
+    suffix = "[Y/n]" if default else "[y/N]"
+    while True:
+        try:
+            answer = input(f"{c('?', '35')} {question} {suffix} ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return default
+        if not answer:
+            return default
+        if answer in ("y", "yes"):
+            return True
+        if answer in ("n", "no"):
+            return False
+        warn("Please answer 'y' or 'n'.")
+
+
+def ensure_local_bin_on_path():
+    """Put ~/.local/bin, ~/.cargo/bin and ~/go/bin on PATH if they exist."""
+    path = os.environ.get("PATH", "").split(os.pathsep)
+    for extra in (LOCAL_BIN, Path.home() / ".cargo" / "bin", Path.home() / "go" / "bin"):
+        if extra.is_dir() and str(extra) not in path:
+            os.environ["PATH"] = f"{extra}{os.pathsep}{os.environ.get('PATH', '')}"
+            path.insert(0, str(extra))
+
+
+def os_name():
+    if sys.platform == "darwin":
+        return "macos"
+    if sys.platform.startswith("linux"):
+        if os.path.exists("/etc/arch-release") or shutil.which("pacman"):
+            return "arch"
+        if os.path.exists("/etc/debian_version") or shutil.which("apt-get"):
+            return "debian"
+        return "linux"
+    return sys.platform
+
+
+def cpu_arch():
+    machine = platform.machine().lower()
+    return {"arm64": "arm64", "aarch64": "arm64",
+            "x86_64": "amd64", "amd64": "amd64",
+            "armv7l": "armv7", "i386": "i686", "i686": "i686"}.get(machine, machine)
+
+
+def pkg_manager():
+    """Return the best available system package manager name."""
+    if sys.platform == "darwin":
+        return "brew" if shutil.which("brew") else None
+    for pm in ("pacman", "apt-get", "dnf", "zypper", "brew"):
+        if shutil.which(pm):
+            return pm
+    return None
+
+
+PKG_NAMES = {
+    "rust": {"brew": "rust", "apt-get": "cargo", "pacman": "rust", "dnf": "cargo", "zypper": "cargo"},
+    "go":   {"brew": "go",   "apt-get": "golang-go", "pacman": "go", "dnf": "golang", "zypper": "go"},
+    "venv": {"brew": "python", "apt-get": "python3-venv", "pacman": "python", "dnf": "python3", "zypper": "python3"},
+}
+
+
+def system_install(packages):
+    """Install system packages with the detected package manager."""
+    pm = pkg_manager()
+    if not pm:
+        warn("No supported package manager found (brew / apt / pacman / dnf / zypper).")
+        return False
+    if pm == "apt-get":
+        run(["sudo", "apt-get", "update"])
+        cmd = ["sudo", "apt-get", "install", "-y", *packages]
+    elif pm == "pacman":
+        cmd = ["sudo", "pacman", "-S", "--needed", "--noconfirm", *packages]
+    elif pm == "dnf":
+        cmd = ["sudo", "dnf", "install", "-y", *packages]
+    elif pm == "zypper":
+        cmd = ["sudo", "zypper", "--non-interactive", "install", *packages]
+    else:  # brew
+        cmd = ["brew", "install", *packages]
+    info(f"Running: {' '.join(cmd)}")
+    return run(cmd)
+
+
+# ---------- GitHub release downloads (no compiler needed) ----------
+def _github_latest_asset(repo, predicate):
+    url = f"https://api.github.com/repos/{repo}/releases/latest"
+    req = urllib.request.Request(url, headers={"User-Agent": "appgrab",
+                                               "Accept": "application/vnd.github+json"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.load(resp)
+    except Exception as exc:  # noqa: BLE001
+        warn(f"GitHub API request failed for {repo}: {exc}")
+        return None, None
+    for asset in data.get("assets", []):
+        if predicate(asset["name"]):
+            return asset["name"], asset["browser_download_url"]
+    return None, None
+
+
+def _download(url, dest):
+    req = urllib.request.Request(url, headers={"User-Agent": "appgrab"})
+    with urllib.request.urlopen(req, timeout=120) as resp, open(dest, "wb") as handle:
+        shutil.copyfileobj(resp, handle)
+
+
+def _fetch_text(url):
+    req = urllib.request.Request(url, headers={"User-Agent": "appgrab"})
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return resp.read().decode()
+
+
+def _sha256(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def install_from_release(repo, asset_predicate, binary_name, checksum_predicate=None):
+    """Download a prebuilt binary (raw or .tar.gz) from a GitHub release."""
+    name, url = _github_latest_asset(repo, asset_predicate)
+    if not url:
+        warn(f"No prebuilt binary available for this platform in {repo}.")
+        return False
+
+    LOCAL_BIN.mkdir(parents=True, exist_ok=True)
+    workdir = Path(tempfile.mkdtemp(prefix="appgrab-"))
+    try:
+        download = workdir / name
+        info(f"Downloading {name} ...")
+        _download(url, download)
+
+        if checksum_predicate:
+            _, checksum_url = _github_latest_asset(repo, checksum_predicate)
+            if checksum_url:
+                try:
+                    expected = _fetch_text(checksum_url).split()[0]
+                    if expected.lower() != _sha256(download).lower():
+                        err("Checksum mismatch - aborting install.")
+                        return False
+                    ok("Checksum verified.")
+                except Exception as exc:  # noqa: BLE001
+                    warn(f"Could not verify checksum: {exc}")
+
+        target = LOCAL_BIN / binary_name
+        if name.endswith((".tar.gz", ".tgz")):
+            with tarfile.open(download, "r:gz") as archive:
+                files = [m for m in archive.getmembers() if m.isfile()]
+                member = next((m for m in files
+                               if m.name.split("/")[-1].startswith(binary_name)), None)
+                if member is None and len(files) == 1:
+                    member = files[0]
+                if member is None:
+                    err(f"{binary_name} not found inside {name}.")
+                    return False
+                with archive.extractfile(member) as src, open(target, "wb") as dst:
+                    shutil.copyfileobj(src, dst)
+        else:
+            shutil.copy2(download, target)
+
+        target.chmod(0o755)
+        ok(f"Installed {binary_name} -> {target}")
+        return True
+    except Exception as exc:  # noqa: BLE001
+        err(f"Download/install failed: {exc}")
+        return False
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
 def have_google_play_scraper():
     try:
         import google_play_scraper  # noqa: F401
         return True
     except ImportError:
         return False
+
+
+def ensure_venv_support():
+    """Offer to install Python's venv module when it is unavailable."""
+    pm = pkg_manager()
+    packages = PKG_NAMES["venv"].get(pm, [])
+    if not packages:
+        return False
+    warn("Creating a virtualenv failed; the 'venv' module may be missing.")
+    if not confirm("Install Python virtualenv support via the system package manager?"):
+        return False
+    return system_install([packages])
 
 
 def bootstrap_python_env():
@@ -69,7 +267,14 @@ def bootstrap_python_env():
     if os.environ.get(BOOTSTRAP_ENV) == "1":
         err("google-play-scraper is still unavailable after bootstrapping.")
         sys.exit(1)
+
+    warn("Python dependency 'google-play-scraper' is missing.")
+    if not confirm("Set up an isolated Python environment and install it now?"):
+        err("Cannot continue without google-play-scraper.")
+        sys.exit(1)
     os.environ[BOOTSTRAP_ENV] = "1"
+
+    ensure_local_bin_on_path()
 
     def reexec(program, argv):
         sys.stdout.flush()
@@ -85,7 +290,10 @@ def bootstrap_python_env():
     venv_py = VENV_DIR / ("Scripts" if os.name == "nt" else "bin") / ("python.exe" if os.name == "nt" else "python")
     if not venv_py.exists():
         VENV_DIR.parent.mkdir(parents=True, exist_ok=True)
-        if not run([sys.executable, "-m", "venv", str(VENV_DIR)]):
+        created = run([sys.executable, "-m", "venv", str(VENV_DIR)])
+        if not created and ensure_venv_support():
+            created = run([sys.executable, "-m", "venv", str(VENV_DIR)])
+        if not created:
             err("Failed to create virtualenv.")
             sys.exit(1)
     info("Installing google-play-scraper into the virtualenv ...")
@@ -96,75 +304,135 @@ def bootstrap_python_env():
     reexec(str(venv_py), [str(venv_py), str(SCRIPT_PATH), *sys.argv[1:]])
 
 
-def ensure_apkeep():
-    """Install apkeep via cargo if missing. Falls back to brew/apt if available."""
-    if shutil.which("apkeep"):
-        return True
-
-    info("apkeep not found. Attempting to install...")
-
-    # Prefer cargo (official method)
+def ensure_rust():
+    """Make cargo available, installing the Rust toolchain if the user agrees."""
     if shutil.which("cargo"):
-        info("Using cargo to install apkeep (this may take a few minutes)...")
-        if run(["cargo", "install", "apkeep"]):
-            ok("apkeep installed via cargo")
+        return True
+    warn("Rust/cargo is required to build apkeep from source.")
+    if not confirm("Install the Rust toolchain now?"):
+        return False
+    ensure_local_bin_on_path()
+    packages = PKG_NAMES["rust"].get(pkg_manager())
+    if packages and system_install([packages]):
+        ensure_local_bin_on_path()
+        if shutil.which("cargo"):
             return True
-
-    # Fallback: brew (macOS/Linux)
-    if shutil.which("brew"):
-        info("cargo not found, trying homebrew...")
-        if run(["brew", "install", "apkeep"]):
-            ok("apkeep installed via brew")
-            return True
-
-    err("Could not install apkeep automatically.")
-    err("Install manually: https://github.com/EFForg/apkeep")
-    err("  cargo install apkeep")
-    err("  or: brew install apkeep")
+    if shutil.which("curl"):
+        info("Installing Rust via rustup ...")
+        if run("curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y", shell=True):
+            ensure_local_bin_on_path()
+            return shutil.which("cargo") is not None
     return False
 
 
-def ensure_ipatool():
-    """Install ipatool (iOS App Store) via brew/go if missing."""
-    if shutil.which("ipatool"):
+def ensure_go():
+    """Make the Go toolchain available, installing it if the user agrees."""
+    if shutil.which("go"):
+        return True
+    warn("Go is required to build ipatool from source.")
+    if not confirm("Install the Go toolchain now?"):
+        return False
+    ensure_local_bin_on_path()
+    packages = PKG_NAMES["go"].get(pkg_manager())
+    if packages and system_install([packages]):
+        ensure_local_bin_on_path()
+        if shutil.which("go"):
+            return True
+    return False
+
+
+def install_tool(display, check, strategies, manual_hint):
+    """Install a native tool, asking first and trying each strategy in order."""
+    if check():
         return True
 
-    info("ipatool not found. Attempting to install...")
-    if shutil.which("brew"):
-        if run(["brew", "install", "ipatool"]):
-            ok("ipatool installed via brew")
-            return True
-    if shutil.which("go"):
-        if run(["go", "install", "github.com/majd/ipatool/v2@latest"]):
-            ok("ipatool installed via go")
-            return True
+    warn(f"{display} is not installed.")
+    if not confirm(f"Install {display} now?"):
+        err(f"Skipped {display}. Install manually: {manual_hint}")
+        return False
 
-    err("Could not install ipatool automatically.")
-    err("Install manually: https://github.com/majd/ipatool")
-    err("  brew install ipatool")
+    for label, action in strategies:
+        info(f"Trying to install {display} via {label} ...")
+        try:
+            if action():
+                ensure_local_bin_on_path()
+                if check():
+                    ok(f"{display} installed via {label}.")
+                    return True
+        except Exception as exc:  # noqa: BLE001
+            warn(f"{label} failed: {exc}")
+
+    err(f"Could not install {display} automatically. Install manually: {manual_hint}")
     return False
 
 
-def ensure_dependencies(platform="android"):
+def apkeep_strategies():
+    """Install strategies for apkeep, cross-platform."""
+    triples = {"amd64": "x86_64-unknown-linux-gnu",
+               "arm64": "aarch64-unknown-linux-gnu",
+               "armv7": "armv7-unknown-linux-gnueabihf",
+               "i686": "i686-unknown-linux-gnu"}
+    triple = triples.get(cpu_arch())
+    strategies = []
+
+    if shutil.which("brew"):
+        strategies.append(("homebrew", lambda: run(["brew", "install", "apkeep"])))
+    if sys.platform.startswith("linux") and triple:
+        strategies.append(("prebuilt binary", lambda t=triple: install_from_release(
+            "EFForg/apkeep", lambda name, t=t: name == f"apkeep-{t}", "apkeep")))
+    if shutil.which("cargo"):
+        strategies.append(("cargo", lambda: run(["cargo", "install", "apkeep"])))
+    strategies.append(("rust + cargo",
+                       lambda: ensure_rust() and run(["cargo", "install", "apkeep"])))
+    return strategies
+
+
+def ipatool_strategies():
+    """Install strategies for ipatool, cross-platform."""
+    os_tag = {"macos": "macos", "arch": "linux", "debian": "linux", "linux": "linux"}.get(os_name())
+    arch = cpu_arch()
+    strategies = []
+
+    if os_tag and arch in ("amd64", "arm64"):
+        suffix = f"-{os_tag}-{arch}.tar.gz"
+
+        def predicate(name, suffix=suffix):
+            return name.endswith(suffix)
+
+        strategies.append(("prebuilt binary", lambda p=predicate, s=suffix: install_from_release(
+            "majd/ipatool", p, "ipatool",
+            checksum_predicate=lambda name, s=s: name.endswith(s + ".sha256sum"))))
+    if shutil.which("brew"):
+        strategies.append(("homebrew", lambda: run(["brew", "install", "ipatool"])))
+    if shutil.which("go"):
+        strategies.append(("go", lambda: run(
+            ["go", "install", "github.com/majd/ipatool/v2@latest"])))
+    strategies.append(("go (install toolchain)",
+                       lambda: ensure_go() and run(
+                           ["go", "install", "github.com/majd/ipatool/v2@latest"])))
+    return strategies
+
+
+def ensure_dependencies(platform_name="android"):
     """Ensure all runtime dependencies are present for the chosen platform."""
-    if platform == "ios":
-        if not ensure_ipatool():
+    ensure_local_bin_on_path()
+
+    if platform_name == "ios":
+        ok_install = install_tool(
+            "ipatool",
+            lambda: shutil.which("ipatool") is not None,
+            ipatool_strategies(),
+            "https://github.com/majd/ipatool (brew install ipatool / go install ...)")
+        if not ok_install:
             sys.exit(1)
         return
 
-    # 1. Rust/cargo (only needed if apkeep isn't already installed)
-    if not shutil.which("apkeep") and not shutil.which("cargo"):
-        warn("Neither apkeep nor cargo found.")
-        if shutil.which("apt"):
-            info("Attempting to install Rust via apt...")
-            run(["sudo", "apt", "update"])
-            run(["sudo", "apt", "install", "-y", "cargo"])
-        elif shutil.which("brew"):
-            info("Attempting to install Rust via brew...")
-            run(["brew", "install", "rust"])
-
-    # 2. apkeep itself
-    if not ensure_apkeep():
+    ok_install = install_tool(
+        "apkeep",
+        lambda: shutil.which("apkeep") is not None,
+        apkeep_strategies(),
+        "https://github.com/EFForg/apkeep (brew install apkeep / cargo install apkeep)")
+    if not ok_install:
         sys.exit(1)
 
 
@@ -185,7 +453,7 @@ def save_config(cfg):
 def cmd_setup(args):
     if getattr(args, "platform", "android") == "ios":
         info("Signing in to the App Store via ipatool ...")
-        sys.exit(subprocess.run(["ipatool", "auth", "login"]).returncode)
+        sys.exit(subprocess.run(["ipatool", "auth", "login"], check=False).returncode)
 
     cfg = load_config()
     print("Configure AppGrab (press Enter to keep existing value)\n")
@@ -211,8 +479,8 @@ def iap_run(args, capture=False):
     """Run an ipatool sub-command in non-interactive JSON mode."""
     cmd = ["ipatool", *args, "--format", "json", "--non-interactive"]
     if capture:
-        return subprocess.run(cmd, capture_output=True, text=True)
-    return subprocess.run(cmd)
+        return subprocess.run(cmd, capture_output=True, text=True, check=False)
+    return subprocess.run(cmd, check=False)
 
 
 def iap_json(args):
@@ -301,7 +569,7 @@ def download_single(app_id, cfg, source, outdir, parallel):
     base.append(outdir)
 
     info(f"Downloading {app_id} ...")
-    r = subprocess.run(base)
+    r = subprocess.run(base, check=False)
     if r.returncode == 0:
         ok(f"Done: {app_id}")
     else:
@@ -328,7 +596,7 @@ def download_bulk(app_ids, cfg, source, outdir, parallel):
         args.append(outdir)
 
         info(f"Downloading {len(app_ids)} apps from {source} (parallel={parallel}) ...")
-        r = subprocess.run(args)
+        r = subprocess.run(args, check=False)
         if r.returncode == 0:
             ok(f"All downloads complete. Files in: {os.path.abspath(outdir)}")
         else:
@@ -359,11 +627,9 @@ def cmd_search_ios(args):
         info("Dry run — skipping downloads.")
         return
 
-    if not args.yes:
-        confirm = input(f"Download all {len(results)} apps to '{outdir}'? [y/N] ").strip().lower()
-        if confirm not in ("y", "yes"):
-            warn("Aborted.")
-            return
+    if not confirm(f"Download all {len(results)} apps to '{outdir}'?", default=False):
+        warn("Aborted.")
+        return
 
     require_iap_auth()
     sys.exit(iap_download_bulk([r["appId"] for r in results], outdir,
@@ -395,11 +661,9 @@ def cmd_search(args):
         info("Dry run — skipping downloads.")
         return
 
-    if not args.yes:
-        confirm = input(f"Download all {len(results)} apps to '{outdir}'? [y/N] ").strip().lower()
-        if confirm not in ("y", "yes"):
-            warn("Aborted.")
-            return
+    if not confirm(f"Download all {len(results)} apps to '{outdir}'?", default=False):
+        warn("Aborted.")
+        return
 
     download_bulk([r["appId"] for r in results], cfg, source, outdir, args.parallel)
 
@@ -431,28 +695,36 @@ def add_purchase(parser):
                         help="iOS: acquire an App Store license if required (default: on)")
 
 
+def add_yes(parser):
+    parser.add_argument("-y", "--yes", action="store_true", default=argparse.SUPPRESS,
+                        help="Assume 'yes' for install/download prompts")
+
+
 def main():
     p = argparse.ArgumentParser(
         prog="appgrab",
         description="Search and bulk-download Android APKs (apkeep) and iOS IPAs (ipatool). "
-                    "Defaults to the free APKPure source.",
+                    "Missing dependencies are installed on demand.",
     )
+    p.add_argument("-y", "--yes", action="store_true",
+                   help="Assume 'yes' for install/download prompts")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sp = sub.add_parser("setup", help="Configure credentials (Google Play AAS token or App Store login)")
     add_platform(sp)
+    add_yes(sp)
     sp.set_defaults(func=cmd_setup)
 
     sp = sub.add_parser("search", help="Search a store and download all results")
     sp.add_argument("term")
     add_platform(sp)
     add_purchase(sp)
+    add_yes(sp)
     sp.add_argument("--limit", type=int, default=10)
     sp.add_argument("-o", "--output", default=None)
     sp.add_argument("-s", "--source", default="apk-pure", choices=ANDROID_SOURCES,
                     help="Android download source (ignored for -p ios)")
     sp.add_argument("-r", "--parallel", type=int, default=4)
-    sp.add_argument("-y", "--yes", action="store_true", help="Skip confirmation prompt")
     sp.add_argument("--dry-run", action="store_true", help="Only list results, don't download")
     sp.set_defaults(func=cmd_search)
 
@@ -460,6 +732,7 @@ def main():
     sp.add_argument("app_id")
     add_platform(sp)
     add_purchase(sp)
+    add_yes(sp)
     sp.add_argument("-o", "--output", default=None)
     sp.add_argument("-s", "--source", default="apk-pure", choices=ANDROID_SOURCES,
                     help="Android download source (ignored for -p ios)")
@@ -467,6 +740,9 @@ def main():
     sp.set_defaults(func=cmd_download)
 
     args = p.parse_args()
+    global ASSUME_YES
+    if getattr(args, "yes", False):
+        ASSUME_YES = True
     ensure_dependencies(getattr(args, "platform", "android"))
     args.func(args)
 
