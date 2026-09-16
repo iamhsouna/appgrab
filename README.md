@@ -103,6 +103,7 @@ Commands:
   setup      Configure credentials (Google Play AAS token or App Store login)
   search     Search a store and download all results
   download   Download a single app by bundle/app id
+  update     Update AppGrab to the latest version
 ```
 
 Common options:
@@ -155,6 +156,28 @@ Common options:
 ```
 
 Downloads are saved as `{bundleID}_{appID}_{version}.ipa`.
+
+## Updating
+
+Update in place — no need to re-run the installer:
+
+```bash
+appgrab update           # update to the latest version
+appgrab update --check   # just report whether an update is available
+appgrab --version        # show the installed version
+```
+
+`appgrab update` detects how it was installed and does the right thing:
+
+| Installation | What `update` runs |
+| --- | --- |
+| git clone | `git pull --ff-only` |
+| `uv tool install` | `uv tool upgrade appgrab` (falls back to reinstall) |
+| `pipx install` | `pipx install --force git+…` |
+| single-file in `~/.local/bin` | re-downloads the latest `appgrab.py` |
+
+> For a **private** repo, updating needs GitHub auth: have `gh auth login` done,
+> or set `GITHUB_TOKEN`.
 
 ## How it works
 

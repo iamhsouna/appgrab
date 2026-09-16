@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "appgrab"
-version = "1.1.0"
+dynamic = ["version"]
 description = "Search and bulk-download Android APKs (apkeep) and iOS IPAs (ipatool) from one CLI"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -22,3 +22,6 @@ appgrab = "appgrab:main"
 
 [tool.setuptools]
 py-modules = ["appgrab"]
+
+[tool.setuptools.dynamic]
+version = { attr = "appgrab.__version__" }

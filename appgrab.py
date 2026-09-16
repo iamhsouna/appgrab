@@ -17,6 +17,7 @@ import hashlib
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -25,6 +26,12 @@ import tempfile
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+
+__version__ = "1.1.0"
+
+REPO_SLUG = os.environ.get("APPGRAB_REPO", "iamhsouna/appgrab")
+REPO_URL = f"https://github.com/{REPO_SLUG}"
+REF = os.environ.get("APPGRAB_REF", "main")
 
 CONFIG_DIR = Path.home() / ".config" / "appgrab"
 CONFIG_FILE = CONFIG_DIR / "config.json"
@@ -680,6 +687,123 @@ def cmd_download(args):
     sys.exit(download_single(args.app_id, cfg, source, outdir, args.parallel))
 
 
+# ---------- Update ----------
+def parse_version(text):
+    match = re.search(r'^__version__\s*=\s*["\']([^"\']+)', text, re.MULTILINE)
+    return match.group(1) if match else None
+
+
+def fetch_remote_script():
+    """Fetch the latest appgrab.py from GitHub (works with private repos)."""
+    if shutil.which("gh"):
+        result = subprocess.run(
+            ["gh", "api", f"repos/{REPO_SLUG}/contents/appgrab.py?ref={REF}",
+             "-H", "Accept: application/vnd.github.raw"],
+            capture_output=True, text=True, check=False)
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout
+
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    request = urllib.request.Request(
+        f"https://api.github.com/repos/{REPO_SLUG}/contents/appgrab.py?ref={REF}",
+        headers={"User-Agent": "appgrab", "Accept": "application/vnd.github.raw"})
+    if token:
+        request.add_header("Authorization", f"Bearer {token}")
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            return response.read().decode()
+    except Exception as exc:  # noqa: BLE001
+        warn(f"Could not fetch the latest version: {exc}")
+        return None
+
+
+def tool_is_installed(manager, name):
+    if manager == "uv":
+        result = subprocess.run(["uv", "tool", "list"], capture_output=True, text=True, check=False)
+    else:
+        result = subprocess.run(["pipx", "list", "--short"], capture_output=True, text=True, check=False)
+    return result.returncode == 0 and bool(re.search(rf"\b{re.escape(name)}\b", result.stdout))
+
+
+def update_single_file():
+    """Replace this running script with the latest version from GitHub."""
+    info("Checking for a newer version ...")
+    remote = fetch_remote_script()
+    if not remote:
+        err("Could not download the update (private repo? run 'gh auth login' or set GITHUB_TOKEN).")
+        return 1
+
+    remote_version = parse_version(remote)
+    if remote_version and remote_version == __version__:
+        ok(f"Already up to date (v{__version__}).")
+        return 0
+
+    dest = SCRIPT_PATH
+    tmp = dest.with_name(dest.name + ".new")
+    try:
+        tmp.write_text(remote)
+        tmp.chmod(0o755)
+        os.replace(tmp, dest)
+    except OSError as exc:
+        err(f"Failed to write update: {exc}")
+        tmp.unlink(missing_ok=True)
+        return 1
+    ok(f"Updated v{__version__} -> v{remote_version or 'latest'} ({dest}).")
+    return 0
+
+
+def cmd_update(args):
+    ensure_local_bin_on_path()
+    info(f"AppGrab v{__version__} ({SCRIPT_PATH})")
+
+    if args.check:
+        remote = fetch_remote_script()
+        if not remote:
+            err("Could not check for updates (private repo? run 'gh auth login' or set GITHUB_TOKEN).")
+            return 1
+        remote_version = parse_version(remote) or "unknown"
+        if remote_version == __version__:
+            ok(f"Up to date (v{__version__}).")
+        else:
+            warn(f"Update available: v{__version__} -> v{remote_version}.")
+        return 0
+
+    # 1) Running from a git checkout.
+    repo_dir = SCRIPT_PATH.parent
+    if (repo_dir / ".git").is_dir() and shutil.which("git"):
+        info("Updating git checkout ...")
+        code = subprocess.run(["git", "-C", str(repo_dir), "pull", "--ff-only"],
+                              check=False).returncode
+        if code == 0:
+            ok("Git checkout updated.")
+        else:
+            err("git pull failed - resolve it manually in the repository.")
+        return code
+
+    # 2) Installed as a uv tool.
+    if shutil.which("uv") and tool_is_installed("uv", "appgrab"):
+        info("Updating with 'uv tool' ...")
+        code = subprocess.run(["uv", "tool", "upgrade", "appgrab"], check=False).returncode
+        if code != 0:
+            code = subprocess.run(["uv", "tool", "install", "--force", f"git+{REPO_URL}"],
+                                  check=False).returncode
+        if code == 0:
+            ok("AppGrab updated.")
+        return code
+
+    # 3) Installed as a pipx tool.
+    if shutil.which("pipx") and tool_is_installed("pipx", "appgrab"):
+        info("Updating with pipx ...")
+        code = subprocess.run(["pipx", "install", "--force", f"git+{REPO_URL}"],
+                              check=False).returncode
+        if code == 0:
+            ok("AppGrab updated.")
+        return code
+
+    # 4) Standalone single-file install.
+    return update_single_file()
+
+
 # ---------- CLI ----------
 PLATFORMS = ["android", "ios"]
 ANDROID_SOURCES = ["apk-pure", "google-play", "f-droid", "huawei-app-gallery"]
@@ -708,6 +832,7 @@ def main():
     )
     p.add_argument("-y", "--yes", action="store_true",
                    help="Assume 'yes' for install/download prompts")
+    p.add_argument("-V", "--version", action="version", version=f"appgrab {__version__}")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sp = sub.add_parser("setup", help="Configure credentials (Google Play AAS token or App Store login)")
@@ -739,12 +864,17 @@ def main():
     sp.add_argument("-r", "--parallel", type=int, default=4)
     sp.set_defaults(func=cmd_download)
 
+    sp = sub.add_parser("update", help="Update AppGrab to the latest version")
+    sp.add_argument("--check", action="store_true", help="Only report whether an update is available")
+    sp.set_defaults(func=cmd_update)
+
     args = p.parse_args()
     global ASSUME_YES
     if getattr(args, "yes", False):
         ASSUME_YES = True
-    ensure_dependencies(getattr(args, "platform", "android"))
-    args.func(args)
+    if args.cmd != "update":
+        ensure_dependencies(getattr(args, "platform", "android"))
+    sys.exit(args.func(args) or 0)
 
 
 if __name__ == "__main__":
