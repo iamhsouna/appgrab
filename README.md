@@ -22,11 +22,12 @@ Download all 10 apps to '.'? [y/N] y
 
 - **Two platforms, one tool** — Android (`.apk`) and iOS (`.ipa`) with a single `-p android|ios` switch.
 - **Search or direct download** — search a store and bulk-grab every result, or download a single app by id.
+- **Automatic fallback** — if the Google Play / APKPure source can't provide an app (missing there, geo-restricted, or no credentials), AppGrab retries it from Huawei AppGallery.
 - **Cross-platform** — works on **macOS**, **Ubuntu/Debian**, **Arch Linux** (and other `brew` / `apt` / `pacman` / `dnf` / `zypper` distros).
 - **Zero setup** — missing dependencies are detected and installed on first run *with your permission*.
 - **`uv` or `venv`** — uses [PEP 723](https://peps.python.org/pep-0723/) inline metadata with `uv`, and falls back to a private virtualenv if `uv` isn't installed.
 - **No auth for free sources** — Android defaults to APKPure; iOS only needs your own App Store account login.
-- **Pretty output** — colored, script-friendly progress.
+- **Pretty output** — colored, script-friendly progress, and `Ctrl+C` exits cleanly without a traceback.
 
 ## Requirements
 
@@ -117,6 +118,7 @@ Common options:
 | `-y, --yes` | Auto-accept install/download prompts (`APPGRAB_YES=1` also works) |
 | `--dry-run` | List results without downloading |
 | `-s, --source` | Android source: `apk-pure`, `google-play`, `f-droid`, `huawei-app-gallery` |
+| `--fallback / --no-fallback` | Android: fall back to Huawei AppGallery when the chosen source can't provide an app (default: on) |
 | `--purchase / --no-purchase` | iOS: acquire a license if required (default: on) |
 
 ### Android
@@ -140,6 +142,15 @@ Common options:
 ```bash
 ./appgrab.py setup            # prompts for email + AAS token
 ./appgrab.py download com.whatsapp -s google-play
+```
+
+**Huawei AppGallery fallback** is on by default for the `apk-pure` and
+`google-play` sources: any app they can't provide is automatically retried from
+Huawei AppGallery (useful for region-specific apps). Disable it with
+`--no-fallback`:
+
+```bash
+./appgrab.py search "whatsapp" -s google-play --no-fallback
 ```
 
 ### iOS

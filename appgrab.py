@@ -27,7 +27,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 REPO_SLUG = os.environ.get("APPGRAB_REPO", "iamhsouna/appgrab")
 REPO_URL = f"https://github.com/{REPO_SLUG}"
@@ -552,9 +552,15 @@ def iap_download_bulk(app_ids, outdir, parallel, purchase=True):
     workers = max(1, parallel)
     info(f"Downloading {len(app_ids)} apps from the App Store (parallel={workers}) ...")
 
-    with ThreadPoolExecutor(max_workers=workers) as pool:
+    pool = ThreadPoolExecutor(max_workers=workers)
+    try:
         codes = list(pool.map(
             lambda a: iap_download_one(a, outdir, purchase, verbose=False), app_ids))
+    except KeyboardInterrupt:
+        pool.shutdown(wait=False, cancel_futures=True)
+        raise
+    else:
+        pool.shutdown(wait=True)
 
     failed = [a for a, code in zip(app_ids, codes) if code != 0]
     if failed:
@@ -565,52 +571,82 @@ def iap_download_bulk(app_ids, outdir, parallel, purchase=True):
 
 
 # ---------- apkeep wrappers ----------
-def download_single(app_id, cfg, source, outdir, parallel):
-    Path(outdir).mkdir(parents=True, exist_ok=True)
-    base = ["apkeep", "-a", app_id, "-d", source, "-r", str(parallel), "--accept-tos"]
+# When a source cannot provide an app, retry it from the fallback source.
+FALLBACK_SOURCES = {"google-play": "huawei-app-gallery",
+                    "apk-pure": "huawei-app-gallery"}
+
+
+def source_chain(source, fallback=True):
+    """Ordered list of sources to try: the chosen one, then its fallback."""
+    chain = [source]
+    if fallback:
+        alt = FALLBACK_SOURCES.get(source)
+        if alt and alt not in chain:
+            chain.append(alt)
+    return chain
+
+
+def _apkeep_args(source, cfg, parallel):
+    """Build the common apkeep arguments, or None when credentials are missing."""
+    args = ["apkeep", "-d", source, "-r", str(parallel), "--accept-tos"]
     if source == "google-play":
         if not cfg.get("email") or not cfg.get("aas_token"):
-            err("Google Play requires email + aas_token. Run: appgrab.py setup")
-            sys.exit(1)
-        base += ["-e", cfg["email"], "-t", cfg["aas_token"]]
-    base.append(outdir)
-
-    info(f"Downloading {app_id} ...")
-    r = subprocess.run(base, check=False)
-    if r.returncode == 0:
-        ok(f"Done: {app_id}")
-    else:
-        err(f"apkeep exited with code {r.returncode} for {app_id}")
-    return r.returncode
+            return None
+        args += ["-e", cfg["email"], "-t", cfg["aas_token"]]
+    return args
 
 
-def download_bulk(app_ids, cfg, source, outdir, parallel):
+def download_one_android(app_id, cfg, source, outdir, parallel, fallback=True, verbose=True):
+    """Download a single APK, falling back to Huawei AppGallery when configured."""
     Path(outdir).mkdir(parents=True, exist_ok=True)
+    code = 1
+    chain = source_chain(source, fallback)
+    for i, src in enumerate(chain):
+        if i:
+            warn(f"{app_id} not available via {chain[i - 1]}; trying {src} ...")
+        args = _apkeep_args(src, cfg, parallel)
+        if args is None:
+            err(f"{src} requires email + aas_token. Run: appgrab.py setup")
+            continue
+        if verbose:
+            info(f"Downloading {app_id} from {src} ...")
+        code = subprocess.run(args + ["-a", app_id, outdir], check=False).returncode
+        if code == 0:
+            if verbose:
+                ok(f"Done: {app_id} ({src})")
+            return 0
+        err(f"apkeep exited with code {code} for {app_id} ({src})")
+    return code
 
-    with tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False) as f:
-        csv_path = f.name
-        for app_id in app_ids:
-            f.write(f"{app_id}\n")
 
+def download_single(app_id, cfg, source, outdir, parallel, fallback=True):
+    return download_one_android(app_id, cfg, source, outdir, parallel, fallback)
+
+
+def download_bulk(app_ids, cfg, source, outdir, parallel, fallback=True):
+    Path(outdir).mkdir(parents=True, exist_ok=True)
+    workers = max(1, parallel)
+    chain = source_chain(source, fallback)
+    suffix = f" (fallback: {chain[1]})" if len(chain) > 1 else ""
+    info(f"Downloading {len(app_ids)} apps from {source}{suffix} (parallel={workers}) ...")
+
+    pool = ThreadPoolExecutor(max_workers=workers)
     try:
-        args = ["apkeep", "-c", csv_path, "-f", "1", "-d", source,
-                "-r", str(parallel), "--accept-tos"]
-        if source == "google-play":
-            if not cfg.get("email") or not cfg.get("aas_token"):
-                err("Google Play requires email + aas_token. Run: appgrab.py setup")
-                sys.exit(1)
-            args += ["-e", cfg["email"], "-t", cfg["aas_token"]]
-        args.append(outdir)
+        codes = list(pool.map(
+            lambda a: download_one_android(a, cfg, source, outdir, 1, fallback, verbose=False),
+            app_ids))
+    except KeyboardInterrupt:
+        pool.shutdown(wait=False, cancel_futures=True)
+        raise
+    else:
+        pool.shutdown(wait=True)
 
-        info(f"Downloading {len(app_ids)} apps from {source} (parallel={parallel}) ...")
-        r = subprocess.run(args, check=False)
-        if r.returncode == 0:
-            ok(f"All downloads complete. Files in: {os.path.abspath(outdir)}")
-        else:
-            err(f"apkeep exited with code {r.returncode}")
-        return r.returncode
-    finally:
-        os.unlink(csv_path)
+    failed = [a for a, code in zip(app_ids, codes) if code != 0]
+    if failed:
+        err(f"{len(failed)}/{len(app_ids)} downloads failed: {', '.join(failed)}")
+        return 1
+    ok(f"All downloads complete. Files in: {os.path.abspath(outdir)}")
+    return 0
 
 
 # ---------- Commands ----------
@@ -672,7 +708,8 @@ def cmd_search(args):
         warn("Aborted.")
         return
 
-    download_bulk([r["appId"] for r in results], cfg, source, outdir, args.parallel)
+    download_bulk([r["appId"] for r in results], cfg, source, outdir,
+                  args.parallel, fallback=args.fallback)
 
 
 def cmd_download(args):
@@ -684,7 +721,8 @@ def cmd_download(args):
         sys.exit(iap_download_one(args.app_id, outdir, purchase=args.purchase))
 
     source = args.source or cfg.get("source", "apk-pure")
-    sys.exit(download_single(args.app_id, cfg, source, outdir, args.parallel))
+    sys.exit(download_single(args.app_id, cfg, source, outdir,
+                             args.parallel, fallback=args.fallback))
 
 
 # ---------- Update ----------
@@ -824,6 +862,12 @@ def add_yes(parser):
                         help="Assume 'yes' for install/download prompts")
 
 
+def add_fallback(parser):
+    parser.add_argument("--fallback", action=argparse.BooleanOptionalAction, default=True,
+                        help="Fall back to Huawei AppGallery when the chosen source "
+                             "can't provide an app (default: on)")
+
+
 def main():
     p = argparse.ArgumentParser(
         prog="appgrab",
@@ -845,6 +889,7 @@ def main():
     add_platform(sp)
     add_purchase(sp)
     add_yes(sp)
+    add_fallback(sp)
     sp.add_argument("--limit", type=int, default=10)
     sp.add_argument("-o", "--output", default=None)
     sp.add_argument("-s", "--source", default="apk-pure", choices=ANDROID_SOURCES,
@@ -858,6 +903,7 @@ def main():
     add_platform(sp)
     add_purchase(sp)
     add_yes(sp)
+    add_fallback(sp)
     sp.add_argument("-o", "--output", default=None)
     sp.add_argument("-s", "--source", default="apk-pure", choices=ANDROID_SOURCES,
                     help="Android download source (ignored for -p ios)")
@@ -868,13 +914,18 @@ def main():
     sp.add_argument("--check", action="store_true", help="Only report whether an update is available")
     sp.set_defaults(func=cmd_update)
 
-    args = p.parse_args()
-    global ASSUME_YES
-    if getattr(args, "yes", False):
-        ASSUME_YES = True
-    if args.cmd != "update":
-        ensure_dependencies(getattr(args, "platform", "android"))
-    sys.exit(args.func(args) or 0)
+    try:
+        args = p.parse_args()
+        global ASSUME_YES
+        if getattr(args, "yes", False):
+            ASSUME_YES = True
+        if args.cmd != "update":
+            ensure_dependencies(getattr(args, "platform", "android"))
+        sys.exit(args.func(args) or 0)
+    except KeyboardInterrupt:
+        print()
+        warn("Interrupted.")
+        sys.exit(130)
 
 
 if __name__ == "__main__":
