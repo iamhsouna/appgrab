@@ -597,9 +597,13 @@ def _apkeep_args(source, cfg, parallel):
 
 
 def download_one_android(app_id, cfg, source, outdir, parallel, fallback=True, verbose=True):
-    """Download a single APK, falling back to Huawei AppGallery when configured."""
-    Path(outdir).mkdir(parents=True, exist_ok=True)
-    code = 1
+    """Download a single APK, falling back to Huawei AppGallery when configured.
+
+    apkeep can exit 0 without fetching anything (e.g. "Could not get download
+    URL ... Skipping..."), so success is judged by whether a file was produced.
+    """
+    out = Path(outdir)
+    out.mkdir(parents=True, exist_ok=True)
     chain = source_chain(source, fallback)
     for i, src in enumerate(chain):
         if i:
@@ -610,13 +614,21 @@ def download_one_android(app_id, cfg, source, outdir, parallel, fallback=True, v
             continue
         if verbose:
             info(f"Downloading {app_id} from {src} ...")
-        code = subprocess.run(args + ["-a", app_id, outdir], check=False).returncode
-        if code == 0:
-            if verbose:
-                ok(f"Done: {app_id} ({src})")
-            return 0
-        err(f"apkeep exited with code {code} for {app_id} ({src})")
-    return code
+        workdir = Path(tempfile.mkdtemp(prefix=".appgrab-", dir=str(out)))
+        try:
+            code = subprocess.run(args + ["-a", app_id, str(workdir)],
+                                  check=False).returncode
+            produced = [p for p in workdir.rglob("*") if p.is_file()]
+            if produced:
+                for path in produced:
+                    shutil.move(str(path), str(out / path.name))
+                if verbose:
+                    ok(f"Done: {app_id} ({src})")
+                return 0
+            err(f"No APK produced for {app_id} via {src} (apkeep exit {code})")
+        finally:
+            shutil.rmtree(workdir, ignore_errors=True)
+    return 1
 
 
 def download_single(app_id, cfg, source, outdir, parallel, fallback=True):
