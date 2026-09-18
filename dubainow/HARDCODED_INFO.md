@@ -86,7 +86,7 @@ Recovered by base64-decoding string literals found in `libapp.so` (the app clear
 | `UTRZQkRKVkpIWE5aZklHcmt2T3h5Tm53NjVZYTpDdk9URDNyQlJuMVRlOE5wVEN3bjVWZ2EyZkVh` | `Q4YBDJVJHXNZfIGrkvOxyNnw65Ya:CvOTD3rBRn1Te8NpTCwn5Vga2fEa` | mParking / URL credential |
 | `ShNP22hyl1jUU2RGjTRkpg==` | `4a134fdb68729758d45364468d3464a6` (32-hex, near `UaePassSignResponse`) | possible signing key/secret |
 
-Additional 32-hex constants associated with specific features (Zakat, Noqodi, SOS, UnifyApp) — purpose unconfirmed: `a0b80602578e6f559c7137c8459ee1c9`, `d6031998d1b3bbfebf59cc9bbff9aee1`, `e6a8f981eab3a36bbd06c5a162440176`, `e87579c11079f43dd824993c2cee5ed3`, `5eeefca380d02919dc2c6558bb6d8a5d`.
+Additional 32-hex constants: `e6a8f981eab3a36bbd06c5a162440176` **is the Amplitude API key** (confirmed at runtime — see §11). The remaining values (`a0b80602578e6f559c7137c8459ee1c9`, `d6031998d1b3bbfebf59cc9bbff9aee1`, `e87579c11079f43dd824993c2cee5ed3`, `5eeefca380d02919dc2c6558bb6d8a5d`) are still unidentified.
 
 Relevant headers hardcoded in the app: `Basic`, `X-API-Key`, `X-Authorization-Coder`, `X-Refresh-Token`, `X-CSRFTOKEN`, `X-Requested-With`; plus URL params `authorization=Bearer <dubainowIdToken>`.
 
@@ -419,9 +419,51 @@ Two distinct protections were found. Neither is a password/key-based cipher that
 
 - iOS native code could **not** be string-dumped because Apple FairPlay encryption (`cryptid=1`) covers `__TEXT` of `DubaiNow`, `App.framework/App` and every framework/appex. All values above from iOS come from unencrypted property lists, entitlements and the shared Flutter asset bundle.
 - PairIP (Android) is VM virtualization, not encryption; embedded plaintext identifiers were recovered, but full method recovery needs VM reverse-engineering.
-- App-specific Adjust app token and Amplitude API key were not found as literals; they appear to be supplied at runtime. The Happiness Meter client ID/secret also remain unresolved, but a strong UAE Pass `clientID` candidate (`dubainow_mobileapp_prod_v2`) and its scopes were recovered.
+- App-specific Adjust token and Amplitude API key were **recovered at runtime** (see §11): Amplitude API key `e6a8f981eab3a36bbd06c5a162440176`; Adjust tracker token `21yx4br`. The Happiness Meter client ID/secret also remain unresolved, but a strong UAE Pass `clientID` candidate (`dubainow_mobileapp_prod_v2`) and its scopes were recovered.
 - The Google Maps iOS API key is set in Swift code inside the encrypted `DubaiNow` binary and was not recoverable; the Android Maps key is listed in §2.
 - Native Android hardcoded secret **was** recovered from `classes7.dex` (see §2): the prayer-times `X-API-Key`, plus the real APK signing certificate.
 - **Four hardcoded Basic Auth username/password pairs** were recovered by base64-decoding Dart string literals (`mDubaiIndvApp:…` twice, plus two others) — see §2. These are live-looking API credentials embedded in the client.
 - The iOS build ships a few assets the Android build does not (`banner_food_for_all.png`, extra RTA parking-test SVGs, `range_rover.svg`, `ic_parking*`, `pcfc_my_marine_license.svg`), indicating the iOS build is slightly ahead/divergent.
+
+---
+
+## 11. Dynamic analysis (emulator + Frida + runtime data)
+
+Performed for the offensive-security assessment against `com.deg.mdubai` (Android).
+
+### 11.1 Lab setup (important constraint)
+
+- The XAPK only ships **`armeabi-v7a`** native libs (`libapp.so` etc.). Obtaining the **`arm64-v8a`** split from APKPure (`config.arm64_v8a.apk`) was required for a 64-bit target.
+- Emulator findings:
+  - `system-images;android-30;google_apis;x86` (32-bit x86 + ARM translation) installs the 32-bit app but the app **crashes inside `libndk_translation.so`** (`SemanticsDecoder::LDR_immediate` → `FaultyLoad`) during an early JNI→ARM call — the 32-bit ARM translator cannot run the app.
+  - `arm64-v8a` system images are **64-bit only** (`ro.product.cpu.abilist32` empty) and the Android emulator **refuses to run arm64 guests on an x86_64 host** ("CPU Architecture 'arm64' is not supported ... on x86_64 host").
+  - Working configuration: **x86_64 API 34 emulator** (`abilist64=x86_64,arm64-v8a`) + the **arm64-v8a app split**, running under the 64-bit ARM translator. The Dart/Flutter layer initialises (Impeller/GLES, Firebase Messaging, geolocator, connectivity) and PairIP's `LicenseActivity` is shown.
+
+### 11.2 Anti-tamper behaviour (RASP)
+
+- **PairIP license gate:** `com.pairip.licensecheck.LicenseContentProvider.onCreate()` calls `LicenseClient.checkLicense()` at startup. Without Google Play licensing it fails after 3 retries → `LicenseActivity` "Something went wrong" dialog → `System.exit(0)` after 30 s (`scheduleAppShutdown`).
+- **Frida/instrumentation detection:** the app **runs fine unmodified**, but as soon as *any* Frida instrumentation is applied (spawn gate or an inline hook on Java methods, including framework methods such as `System.exit`/`Activity.onStart`) the process dies with `SIGSEGV, code 128 (SI_KERNEL), fault addr 0x0` (tombstone via `crash_dump64`). Merely attaching and enumerating classes is tolerated briefly; installing hooks triggers the kill. PairIP's native layer (`libpairipcore.so`) is the likely detector.
+- Implication: bypassing the license gate with plain Frida method hooks is not viable; a stealthier approach (gadget in a repackaged APK, native-level hooks, or RASP-specific bypass) is required. No APK repackaging/re-signing was attempted to avoid changing the signature the PairIP `SignatureCheck` validates.
+
+### 11.3 Runtime secrets recovered (from `/data/data/com.deg.mdubai`, root)
+
+| Item | Value | Source |
+| --- | --- | --- |
+| **Amplitude API key** | `e6a8f981eab3a36bbd06c5a162440176` | `app_amplitude/.../analytics/identity.properties`, `app_amplitude-kotlin-$default_instance/amplitude-identity-*.properties` |
+| **Adjust tracker token** | `21yx4br` (network `Organic`) | `files/AdjustAttribution` |
+| Firebase sender / app id | `364553237282` / `1:364553237282:android:7ca382e539b9bfaa402b7b` | `shared_prefs/com.google.android.gms.*` |
+| FCM registration token | `fLnhUjiMRRSVsAKX9l48PO:APA91b…` (instance token) | `shared_prefs/com.google.android.gms.appid.xml` |
+| Adjust device id (adid) | `3febffcb5a3118681890d629e0d5bed7` | `files/AdjustIoActivityState` |
+| Amplitude device id | `dfcd5d2f-14d6-46ab-8193-c36c24fe4d4eR` | `app_amplitude/.../identity.properties` |
+| Build/env | version `14.6.29` (code `514`), `ENV=prod` | Amplitude events / app data |
+
+The Amplitude key `e6a8f981eab3a36bbd06c5a162440176` matches the 32-hex constant found statically in `libapp.so` (see §2), confirming it is embedded in the client.
+
+### 11.4 Local storage encryption
+
+- `FlutterSecureStorage` / `flutter_secure_storage` uses Android Keystore-wrapped material:
+  - `shared_prefs/FlutterSecureStorage.xml` holds Jetpack-Security keysets (`AesSivKey`, `AesGcmKey`) — AES keys wrapped by the Keystore.
+  - `shared_prefs/FlutterSecureKeyStorage.xml` stores an RSA-encrypted AES key (`RSA_ECB_OAEPwithSHA-256andMGF1Padding` ↔ `AES_GCM_NoPadding`); the alias decodes to `This is the key for a secure storage AES Key`.
+- Hive boxes (`app_flutter/*.hive`) are present (`authbox`, `settings`, `cache` 99 KB, `graphqlcache` 8.2 MB, `notifications`, `onboarding`); `authbox`/`settings` were empty, and no plaintext JWTs/keys were found in the populated boxes. No offline decryption of the Keystore-wrapped secrets was performed.
+- Sentry native crash store (`cache/sentry/...`) contains crash envelopes, not secrets.
 </content>
