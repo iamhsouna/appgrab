@@ -23,11 +23,12 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-__version__ = "1.2.0"
+__version__ = "1.2.1"
 
 REPO_SLUG = os.environ.get("APPGRAB_REPO", "iamhsouna/appgrab")
 REPO_URL = f"https://github.com/{REPO_SLUG}"
@@ -506,8 +507,34 @@ def iap_json(args):
     return None
 
 
-def iap_search(term, limit):
-    """Search the App Store via ipatool (no auth required)."""
+def itunes_search(term, limit, country="us"):
+    """Search the App Store via Apple's public iTunes Search API (no auth)."""
+    params = urllib.parse.urlencode({
+        "term": term, "media": "software", "entity": "software",
+        "limit": limit, "country": country,
+    })
+    request = urllib.request.Request(
+        f"https://itunes.apple.com/search?{params}",
+        headers={"User-Agent": "appgrab"})
+    with urllib.request.urlopen(request, timeout=30) as response:
+        data = json.loads(response.read().decode())
+    return [{"appId": a["bundleId"], "title": a.get("trackName", ""),
+             "version": a.get("version", ""), "id": a.get("trackId")}
+            for a in data.get("results", []) if a.get("bundleId")]
+
+
+def iap_search(term, limit, country="us"):
+    """Search the App Store without authentication.
+
+    ipatool >= 2.6 requires a signed-in account even for search (and thus a
+    working keyring), so query the public iTunes Search API directly and only
+    fall back to ipatool if that fails.
+    """
+    try:
+        return itunes_search(term, limit, country)
+    except Exception as exc:  # noqa: BLE001
+        warn(f"iTunes Search API failed ({exc}); falling back to ipatool ...")
+
     data = iap_json(["search", term, "--limit", str(limit)])
     apps = (data or {}).get("apps", [])
     return [{"appId": a["bundleID"], "title": a.get("name", ""),
@@ -667,7 +694,7 @@ def cmd_search_ios(args):
     outdir = args.output or cfg.get("output", ".")
 
     info(f'Searching the App Store for "{args.term}" (limit={args.limit}) ...')
-    results = iap_search(args.term, args.limit)
+    results = iap_search(args.term, args.limit, cfg.get("ios_country", "us"))
     if not results:
         warn("No results.")
         return
@@ -686,6 +713,7 @@ def cmd_search_ios(args):
         warn("Aborted.")
         return
 
+    ensure_dependencies("ios")
     require_iap_auth()
     sys.exit(iap_download_bulk([r["appId"] for r in results], outdir,
                                args.parallel, purchase=args.purchase))
@@ -932,7 +960,10 @@ def main():
         if getattr(args, "yes", False):
             ASSUME_YES = True
         if args.cmd != "update":
-            ensure_dependencies(getattr(args, "platform", "android"))
+            platform = getattr(args, "platform", "android")
+            ios_search = platform == "ios" and args.cmd == "search"
+            if not ios_search:
+                ensure_dependencies(platform)
         sys.exit(args.func(args) or 0)
     except KeyboardInterrupt:
         print()
