@@ -57,6 +57,23 @@ Extracted from:
 | `https://api2.amplitude.com/2/httpapi`, `https://api2.amplitude.com/batch`, `https://api.eu.amplitude.com/2/httpapi`, `https://api.eu.amplitude.com/batch` | Amplitude SDK endpoints (key not extractable) | Android `classes*.dex` |
 | `https://app.adjust.com`, `https://app.adjust.io`, `https://gdpr.adjust.com`, `https://gdpr.adjust.io` | Adjust SDK endpoints (app token not extractable) | Android `classes*.dex` |
 
+### Native Android (Kotlin/Glance prayer-times widget)
+
+Recovered by decompiling `classes7.dex` with `jadx` (`com.deg.mdubai.BuildConfig`):
+
+| Value | Purpose | Source |
+| --- | --- | --- |
+| `4ddf08b337e86ea5ef0ea057f83d5bd4ebf9f3fb3a24f81935389e02093cf817` | **`PRAYER_TIMES_API_KEY`** — sent as the `X-API-Key` request header | `BuildConfig.PRAYER_TIMES_API_KEY` |
+| `https://dubainowocp.dubai.ae/internal/gateway/api/services/` | `PRAYER_TIMES_BASE_URL` | `BuildConfig.PRAYER_TIMES_BASE_URL` |
+| `GET islam/v2/prayer/time?month=&year=&cityid=` | Prayer-times endpoint (header `Content-Type: application/json`, `X-API-Key: <key>`) | `PrayerTimesApi` + `PrayerTimesNetworkModule` |
+
+### PairIP integrity hashes (Android)
+
+| Value | Purpose | Source |
+| --- | --- | --- |
+| `L84sBoVqKt1uy26jw/N0uU404apQUUcUfD02pU1MVGo=` | expected APK signing-cert SHA-256 (base64) | `com.pairip.SignatureCheck` |
+| `Vn3kj4pUblROi2S+QfRRL9nhsaO2uoHQg6+dpEtxdTE=` | allowlisted signing-cert SHA-256 (base64) | `com.pairip.SignatureCheck` |
+
 ### Apple / store identifiers
 
 | Value | Purpose | Source |
@@ -67,6 +84,14 @@ Extracted from:
 | `merchant.ni.ae.gov.sdg`, `merchant.ni.ae.gov.sdg.production`, `merchant.ae.sdg.dubainow.staging` | Apple Pay merchant IDs | iOS entitlements (`com.apple.developer.in-app-payments`) |
 | `aps-environment = production` | Push environment | iOS entitlements |
 | `2F:CE:2C:06:85:6A:2A:DD:6E:CB:6E:A3:C3:F3:74:B9:0E:34:E1:AA:50:51:47:14:7C:3D:36:A5:4D:4C:54:6A` | Android signing cert SHA-256 (prod + QA) | `assetlinks.json` |
+
+### Android build info (`BuildConfig`)
+
+| Value | Purpose |
+| --- | --- |
+| `APPLICATION_ID = com.deg.mdubai`, `BUILD_TYPE = release`, `FLAVOR = prod` | Build flavor |
+| `FLUTTER_BUILD_NAME = 14.6.29`, `FLUTTER_BUILD_NUMBER = 514`, `FLUTTER_BUILD_MODE = debug` | Version metadata |
+| `FLUTTER_ROOT = /Users/ddadev2/development/flutter` | **Developer workstation path leak** |
 
 > No AWS keys, JWTs, private keys, bearer tokens, Stripe keys or embedded TLS pinning certificates were found in plaintext. (`happinessMeterClientID` / `happinessMeterServiceProviderSecret` / `client_id` exist only as variable names in the Dart snapshot — their values come from runtime/remote config.)
 
@@ -273,9 +298,52 @@ iOS usage strings: camera, photo library, microphone, speech recognition, contac
 
 ---
 
-## 9. Notes / caveats
+## 9. Encryption / obfuscation deep-dive
+
+Two distinct protections were found. Neither is a password/key-based cipher that can be "decrypted" offline.
+
+### 9.1 Android — Google Play PairIP (VM virtualization)
+
+- App entry point is `com.pairip.application.Application`; `libpairipcore.so` (ARM 32-bit, stripped) provides `VMRunner.executeVM(byte[] code, Object[] args)`.
+- 27 assets in `assets/` (16-char hash names, e.g. `0CVezGtJEyr4W0Fu`) use magic `00 49 41 50` (`\0IAP`, version `2`). They are **PairIP virtual-machine programs**, not AES/data files.
+- `VMRunner` reads `assets/<program>`, `com.pairip.VmDecryptor.decrypt()` is a **no-op** (the bytecode is interpreted by native code, not decrypted in Java), and calls `executeVM`.
+- Native library methods (`BroadcastReceiver.onReceive`, `ListenableWorker.doWork`, `Glance` receivers, Adjust/Media3/Firebase receivers, `StartupLauncher`, …) had their bodies replaced with `VMRunner.invoke("<program>", args)`. Example map:
+
+  | Program file | Replaced class |
+  | --- | --- |
+  | `0Css7BDXHxWItSJX` | `com.pairip.StartupLauncher` (launched from `MyApp.<clinit>`) |
+  | `0CVezGtJEyr4W0Fu` | `androidx.glance.appwidget.MyPackageReplacedReceiver` |
+  | `aFJWULoTHWvstgJy` | `com.adjust.sdk.AdjustReferrerReceiver` |
+  | `iZKxETQ2ntYajVhS` | `com.google.android.gms.measurement.AppMeasurementReceiver` |
+  | `rUIngrau4kqtaoli` | `io.flutter.plugins.urllauncher.WebViewActivity` |
+  | `dBINO7lTTXUKbp7N` | `es.antonborri.home_widget.HomeWidgetBackgroundReceiver` |
+
+- **What was recovered:** the programs are not string-encrypted — plaintext Java descriptors, class names and PairIP method names are embedded, e.g. `Lcom/deg/mdubai/qa/glance/FavouriteWidgetConfigureActivity$c2020060317;`, `Landroid/content/Intent;`, `/proc/self/cmdline`, `onCreate$001`, `getExtras$002`, `getIntent$003`, `getInt$004`, `setResult$005`, `finish$006`, `putExtra$007`, `setResult$008`, `finish$009`, `appWidgetId`, `invalid appWidgetId`.
+- **Why full recovery is a VM RE task:** the rest of each file is custom VM bytecode. Deobfuscating it requires disassembling/reimplementing `libpairipcore.so`'s interpreter (no ARM disassembler was available in this environment; `objdump` lacks ARM support). The payoff is limited — only standard library method bodies are virtualized; the app's own logic lives in the (readable) Flutter `libapp.so`.
+- PairIP additionally embeds the two signing-cert hashes listed in §2 and `SignatureCheck.verifyIntegrity()`.
+
+### 9.2 iOS — Apple FairPlay DRM
+
+- `LC_ENCRYPTION_INFO_64` reports `cryptid = 1` for `DubaiNow` (encrypted range `fileoff 16384`, size `10043392`), `App.framework/App` (`size 41533440`) and every framework/appex.
+- `SC_Info/` contains the FairPlay metadata (`DubaiNow.sinf`, `.supp`, `.supf`, `.v4.supp`, `.v5.supf`, `.supx`, `Manifest.plist`); `sinf` contains `frma=game`, `schm=itun`.
+- FairPlay uses a device-bound key. **It cannot be decrypted offline** — decryption requires a jailbroken/rooted device with the app installed and a runtime dumper (`bagbak`, `frida-ios-dump`, `Clutch`), or the vendor's keys. This is a hard blocker, not a missed step.
+- Everything not DRM-protected in the IPA (all plists, entitlements, `flutter_assets`, localization, `Assets.car`) was extracted; no encrypted app assets were found besides FairPlay.
+
+### 9.3 App-level crypto inventory
+
+- The Dart code imports `pointycastle` and uses AES classes (`AesCipher`, `AES_GCM_NoPadding`, `CBCBlockCipherMac`, …) for PDF/`syncfusion` document handling and general crypto — **no hardcoded AES key/IV for app data was found**.
+- `flutter_secure_storage` delegates to Android Keystore / iOS Keychain (`KeychainAccessibility`, `flutter_secure_storage_service`); no embedded storage key exists.
+- `Hive`/`hive_ce`/`sqflite` caches are used but no Hive AES key literal was found.
+- `NOTICES.Z` is a standard Flutter license bundle (compressed, not encrypted).
+- No password-protected ZIP entries, keystores (`.jks`/`.keystore`), `.p12`/`.pem`/`.crt` files or PGP blobs were present in either package.
+
+---
+
+## 10. Notes / caveats
 
 - iOS native code could **not** be string-dumped because Apple FairPlay encryption (`cryptid=1`) covers `__TEXT` of `DubaiNow`, `App.framework/App` and every framework/appex. All values above from iOS come from unencrypted property lists, entitlements and the shared Flutter asset bundle.
+- PairIP (Android) is VM virtualization, not encryption; embedded plaintext identifiers were recovered, but full method recovery needs VM reverse-engineering.
 - App-specific Adjust app token, Amplitude API key, Happiness Meter client ID/secret and UAE Pass client ID are referenced by name in the Dart snapshot but their literal values are loaded at runtime / supplied via configuration, so they were not recovered in plaintext.
 - The Google Maps iOS API key is set in Swift code inside the encrypted `DubaiNow` binary and was not recoverable; the Android Maps key is listed in §2.
+- Native Android hardcoded secret **was** recovered from `classes7.dex` (see §2): the prayer-times `X-API-Key`.
 </content>
