@@ -74,6 +74,22 @@ Recovered by decompiling `classes7.dex` with `jadx` (`com.deg.mdubai.BuildConfig
 | `L84sBoVqKt1uy26jw/N0uU404apQUUcUfD02pU1MVGo=` | expected APK signing-cert SHA-256 (base64) | `com.pairip.SignatureCheck` |
 | `Vn3kj4pUblROi2S+QfRRL9nhsaO2uoHQg6+dpEtxdTE=` | allowlisted signing-cert SHA-256 (base64) | `com.pairip.SignatureCheck` |
 
+### Hardcoded Basic Auth credentials (base64 literals in the Dart snapshot)
+
+Recovered by base64-decoding string literals found in `libapp.so` (the app clearly uses the `Basic ` auth scheme). Proximity in the snapshot ties each to a feature area:
+
+| Encoded literal | Decoded `username:password` | Likely feature |
+| --- | --- | --- |
+| `bUR1YmFpSW5kdkFwcDptNHU4YSFRQCFuNEE5OQ==` | `mDubaiIndvApp:m4u8a!Q@!n4A99` | Happiness Meter / Donations (`features/happiness_meter/…`) |
+| `bUR1YmFpSW5kdkFwcDpQNzBkbTR1OGEhIW40QTk5` | `mDubaiIndvApp:P70dm4u8a!!n4A99` | App security / entity services |
+| `NXNwMkROWmQ2UFJ1eWxIbWdMRUFIU1lMRl93YTpDQldNQ2RkZnBVNG83aEg1Mmk5d2Z1alJkTWNh` | `5sp2DNZd6PRuylHmgLEAHSYLF_wa:CBWMCddfpU4o7hH52i9wfujRdMca` | Delegation token / rent calculator |
+| `UTRZQkRKVkpIWE5aZklHcmt2T3h5Tm53NjVZYTpDdk9URDNyQlJuMVRlOE5wVEN3bjVWZ2EyZkVh` | `Q4YBDJVJHXNZfIGrkvOxyNnw65Ya:CvOTD3rBRn1Te8NpTCwn5Vga2fEa` | mParking / URL credential |
+| `ShNP22hyl1jUU2RGjTRkpg==` | `4a134fdb68729758d45364468d3464a6` (32-hex, near `UaePassSignResponse`) | possible signing key/secret |
+
+Additional 32-hex constants associated with specific features (Zakat, Noqodi, SOS, UnifyApp) — purpose unconfirmed: `a0b80602578e6f559c7137c8459ee1c9`, `d6031998d1b3bbfebf59cc9bbff9aee1`, `e6a8f981eab3a36bbd06c5a162440176`, `e87579c11079f43dd824993c2cee5ed3`, `5eeefca380d02919dc2c6558bb6d8a5d`.
+
+Relevant headers hardcoded in the app: `Basic`, `X-API-Key`, `X-Authorization-Coder`, `X-Refresh-Token`, `X-CSRFTOKEN`, `X-Requested-With`; plus URL params `authorization=Bearer <dubainowIdToken>`.
+
 ### APK signing certificate (extracted from the APK Signing Block v2)
 
 | Field | Value |
@@ -406,5 +422,6 @@ Two distinct protections were found. Neither is a password/key-based cipher that
 - App-specific Adjust app token and Amplitude API key were not found as literals; they appear to be supplied at runtime. The Happiness Meter client ID/secret also remain unresolved, but a strong UAE Pass `clientID` candidate (`dubainow_mobileapp_prod_v2`) and its scopes were recovered.
 - The Google Maps iOS API key is set in Swift code inside the encrypted `DubaiNow` binary and was not recoverable; the Android Maps key is listed in §2.
 - Native Android hardcoded secret **was** recovered from `classes7.dex` (see §2): the prayer-times `X-API-Key`, plus the real APK signing certificate.
+- **Four hardcoded Basic Auth username/password pairs** were recovered by base64-decoding Dart string literals (`mDubaiIndvApp:…` twice, plus two others) — see §2. These are live-looking API credentials embedded in the client.
 - The iOS build ships a few assets the Android build does not (`banner_food_for_all.png`, extra RTA parking-test SVGs, `range_rover.svg`, `ic_parking*`, `pcfc_my_marine_license.svg`), indicating the iOS build is slightly ahead/divergent.
 </content>
