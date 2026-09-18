@@ -466,4 +466,14 @@ The Amplitude key `e6a8f981eab3a36bbd06c5a162440176` matches the 32-hex constant
   - `shared_prefs/FlutterSecureKeyStorage.xml` stores an RSA-encrypted AES key (`RSA_ECB_OAEPwithSHA-256andMGF1Padding` ↔ `AES_GCM_NoPadding`); the alias decodes to `This is the key for a secure storage AES Key`.
 - Hive boxes (`app_flutter/*.hive`) are present (`authbox`, `settings`, `cache` 99 KB, `graphqlcache` 8.2 MB, `notifications`, `onboarding`); `authbox`/`settings` were empty, and no plaintext JWTs/keys were found in the populated boxes. No offline decryption of the Keystore-wrapped secrets was performed.
 - Sentry native crash store (`cache/sentry/...`) contains crash envelopes, not secrets.
+
+### 11.5 Network interception (mitmproxy, no Frida)
+
+- Method: system CA installed into the Android 14 Conscrypt store (`/apex/com.android.conscrypt/cacerts` via tmpfs overlay + framework restart so app processes inherit it), emulator global proxy → mitmproxy. The app runs **unmodified**, so PairIP's Frida detection is not triggered.
+- Decrypted traffic captured:
+  - `GET https://sr-client-cfg.amplitude.com/config?api_key=e6a8f981eab3a36bbd06c5a162440176` — **runtime confirmation of the Amplitude API key** (also observed in `app_amplitude/.../identity.properties`).
+  - `GET https://app.adjust.com/attribution?initiated_by=backend…` (Adjust).
+  - `POST https://o4506652415754240.ingest.us.sentry.io/api/4507825079910400/…` (Sentry).
+- No Dubainow `*.ae` service calls were observed: PairIP's Play licensing gate prevents the app from loading services. Passing it requires a valid Play-signed license response (the RSA private key is Google's) or Frida (detected), so the main business API calls were not reachable this way.
+- Note: the host DNS here resolves `api2.amplitude.com` / `app-measurement.com` to `0.0.0.0` (external blocklist), unrelated to the app.
 </content>
