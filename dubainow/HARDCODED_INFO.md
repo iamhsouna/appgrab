@@ -74,6 +74,29 @@ Recovered by decompiling `classes7.dex` with `jadx` (`com.deg.mdubai.BuildConfig
 | `L84sBoVqKt1uy26jw/N0uU404apQUUcUfD02pU1MVGo=` | expected APK signing-cert SHA-256 (base64) | `com.pairip.SignatureCheck` |
 | `Vn3kj4pUblROi2S+QfRRL9nhsaO2uoHQg6+dpEtxdTE=` | allowlisted signing-cert SHA-256 (base64) | `com.pairip.SignatureCheck` |
 
+### APK signing certificate (extracted from the APK Signing Block v2)
+
+| Field | Value |
+| --- | --- |
+| Subject / Issuer | `CN=MDubai, OU=Dubai Smart Gov, O=Dubai Smart Gov, L=Dubai, ST=UAE` |
+| Serial | `1503511310` |
+| Validity | 2013-10-22 → 2113-09-28 |
+| SHA-256 | `2fce2c06856a2add6ecb6ea3c3f374b90e34e1aa505147147c3d36a54d4c546a` (matches `assetlinks.json`) |
+| SHA-1 | `e3b505ff7ac6614fdd40cee5a7e4871cd279ac71` |
+
+A second cert in the block is Google's Play signing cert (`CN=Android, O=Google Inc.`, SHA-256 `3257d599a49d2c961a471ca9843f59d341a405884583fc087df4237b733bbd6d`) — the app is additionally signed/rotated by Google Play.
+
+### UAE Pass / identity (Dart snapshot)
+
+| Value | Purpose |
+| --- | --- |
+| `dubainow_mobileapp_prod_v2` | **Candidate UAE Pass `clientID`** (production) |
+| `dubai_nowtcmob_prod` | Secondary app/tenant identifier |
+| `digitalid-users-ids` | UAE Pass scope / key name |
+| `urn:uae:digitalid:profile:general`, `…:profileType`, `…:unifiedId`, `urn:digitalid:authentication:flow:mobileondevice`, `urn:safelayer:tws:policies:authentication:level:low` | UAE Pass `scope` / `acr_values` values |
+| `uaepass://digitalid`, `uaepass://`, `uaepassqa://`, `uaepassstg://` | UAE Pass launch/deep-link schemes |
+| `d4754b73-bc32-422f-b87c-464f89c99fa2` | Unidentified hardcoded UUID constant (others are placeholders such as `aaaaaaaa-…`) |
+
 ### Apple / store identifiers
 
 | Value | Purpose | Source |
@@ -109,6 +132,12 @@ Recovered by decompiling `classes7.dex` with `jadx` (`com.deg.mdubai.BuildConfig
 - App Links (autoVerify): `https://dubainow.dubai.ae/`, `https://dubainow.go.link/`
 - Custom scheme: `dubaiNow://success`, `dubaiNow://failure`
 - Queried packages include UAE Pass (`ae.uaepass.mainapp`, `ae.uaepass.mainapp.stg`), Google Maps (`com.google.android.apps.maps`, `.mapslite`), Waze, Yandex, HERE, TomTom and many map apps.
+
+### Other schemes hardcoded in the Dart code
+
+- `happiness://done` (Happiness Meter callback)
+- Map-launcher schemes: `waze://`, `yandexmaps://`, `yandexnavi://`, `mapsme://`, `citymapper://`, `here`/`share.here.com`, `amapuri://`, `baidumap://`, `qqmap://`, `kakaomap://`, `nmap://`, `tmap://`, `com.sygic.aura://`, `dgis://`, `copilot://`, `truck`/`petalmaps://`, `market://`, `tel://`
+- `uaepass://`, `uaepassqa://`, `uaepassstg://`, `uaepass://digitalid`
 
 ### iOS associated domains / app groups (entitlements)
 
@@ -264,6 +293,30 @@ https://dubainowocp.dubai.ae/internal/gateway/api/services/
 | `wellknown/assetlinks.json` | Android App Links / signing fingerprint (see §2) |
 | `wellknown/apple-app-site-association` | iOS App Links (Team IDs `PTEE8T35KX` / `X95CWGK9TY`) |
 
+### 5.1 Full internal API endpoint map (baked into `new_app_config*.json`)
+
+The bundled config is a complete offline snapshot of the backend CMS and includes
+**194 production** and **232 QA** `base_url` + `end_point` pairs (per-service),
+e.g.:
+
+```
+https://apis.dubai.gov.ae/secure/sdg/dxbnw/ddws/rta/1.0.0/api/services/ext/rta/vehicle/renew        # RenewVehicle
+https://apis.dubai.gov.ae/secure/sdg/dxbnw/ddws/dp/1.0.0/api/services/ext/dp/sos                    # SOS
+https://apis.dubai.gov.ae/secure/sdg/dxbnw/ddws/mbrhe/1.0.0/api/services/ext/mbrhe/landgrant        # LandGrant
+https://api.dubai.gov.ae/secure/sdg/dubainow/paperless/5.0.0/api/entity/salik/manageprofile         # Salik
+https://stg-apis.dubai.gov.ae/secure/sdg/dxbnw/mw-services/1.0.0/api/services/ext/bills?entity=DEWA&serviceCode=DEWABILL  # Bills (QA)
+```
+
+The full list is saved to **`dubainow/HARDCODED_ENDPOINTS.txt`** (434 lines).
+
+### 5.2 Feature flags and catalog sizes (local defaults)
+
+- `new_app_config.json`: **184 services**, **195 journeys**, **46 entities**, **33 feature flags**, **12 categories**, **38 sub-categories**; 179 unique service codes.
+- Feature flags include `app_security_gate_enabled=true`, `tabby_enabled=true`, `enable_face_verification=true` (per-service), `happiness_meter_trigger_count=10`, `delay_in_seconds=10`, `pending_action_call=true`, `city_eye_floating_button_visibility=false`, `new_dubai_ai_flow=false`.
+- `app_version` lists the full rollout history (`14.2.0` … `14.4.8`); `mobile_config.data_last_update = 2025-10-09T23:58:00.000Z`.
+- Auth modes: `SOP1`, `SOP2`, `SOP3`, `GUEST`; social statuses `POD`, `RETIRED`, `SENIOR_CITIZEN`.
+- `hm_configs.json`: 250 Happiness-Meter service mappings.
+
 ---
 
 ## 6. iOS bundle identifiers and extensions
@@ -295,6 +348,11 @@ iOS usage strings: camera, photo library, microphone, speech recognition, contac
 **iOS frameworks:** Adjust / AdjustSig, AmplitudeCore / AmplitudeSwift, Firebase (Core, Installations, Messaging, AnalyticsConnector, GoogleDataTransport), GoogleUtilities, Google Maps resources, Sentry, SwiftyGif, SDWebImage, DKImagePickerController / DKPhotoGallery, TOCropViewController, SwiftProtobuf, plus Flutter plugins (uae pass, syncfusion PDF viewer, flutter_inappwebview, flutter_downloader, live_activities, rive_native, just_audio, speech_to_text, camera, geolocator, etc.).
 
 **Notable Flutter packages** (from `package:` symbols in `libapp.so`): `dubai_now` (app), `sentry_flutter`, `adjust_sdk`, `amplitude_flutter`, `firebase_core/messaging/analytics`, `uaepass`, `graphql`/`gql`, `dio`, `go_router`, `riverpod`, `hive_ce`, `flutter_secure_storage`, `syncfusion_flutter_*`, `flutter_inappwebview`, `flutter_downloader`, `map_launcher`, `live_activities`, `pay`/`pay_platform_interface`, etc.
+
+**Dependency bill of materials** (exact versions):
+
+- Android: **`dubainow/ANDROID_DEPENDENCIES.txt`** (138 entries — AndroidX, Firebase, Play Services, Gradle/AGP `8.13.0`).
+- iOS: **`dubainow/IOS_FRAMEWORKS.txt`** (77 frameworks — e.g. `AdjustSdk 5.8.0`, `AmplitudeSwift 1.17.5`, `FirebaseCore 12.6.0`, `Sentry 8.58.4`, `SDWebImage 5.21.7`, `SwiftProtobuf 1.38.1`).
 
 ---
 
@@ -334,8 +392,10 @@ Two distinct protections were found. Neither is a password/key-based cipher that
 - The Dart code imports `pointycastle` and uses AES classes (`AesCipher`, `AES_GCM_NoPadding`, `CBCBlockCipherMac`, …) for PDF/`syncfusion` document handling and general crypto — **no hardcoded AES key/IV for app data was found**.
 - `flutter_secure_storage` delegates to Android Keystore / iOS Keychain (`KeychainAccessibility`, `flutter_secure_storage_service`); no embedded storage key exists.
 - `Hive`/`hive_ce`/`sqflite` caches are used but no Hive AES key literal was found.
-- `NOTICES.Z` is a standard Flutter license bundle (compressed, not encrypted).
+- `NOTICES.Z` is a standard Flutter license bundle (gzip of 1.8 MB of package licenses, not encrypted).
+- `new_app_config.json` / `new_app_config_qa.json` are **plaintext** offline copies of the backend CMS (services, journeys, endpoints, feature flags) — they are the richest source of hardcoded information and required no decryption (see §5).
 - No password-protected ZIP entries, keystores (`.jks`/`.keystore`), `.p12`/`.pem`/`.crt` files or PGP blobs were present in either package.
+- `SC_Info/Manifest.plist` confirms every iOS framework (`AdjustSdk`, `Amplitude*`, `Firebase*`, `Sentry`, `Flutter`, `App`, all `.appex`es) is individually FairPlay-encrypted.
 
 ---
 
@@ -343,7 +403,8 @@ Two distinct protections were found. Neither is a password/key-based cipher that
 
 - iOS native code could **not** be string-dumped because Apple FairPlay encryption (`cryptid=1`) covers `__TEXT` of `DubaiNow`, `App.framework/App` and every framework/appex. All values above from iOS come from unencrypted property lists, entitlements and the shared Flutter asset bundle.
 - PairIP (Android) is VM virtualization, not encryption; embedded plaintext identifiers were recovered, but full method recovery needs VM reverse-engineering.
-- App-specific Adjust app token, Amplitude API key, Happiness Meter client ID/secret and UAE Pass client ID are referenced by name in the Dart snapshot but their literal values are loaded at runtime / supplied via configuration, so they were not recovered in plaintext.
+- App-specific Adjust app token and Amplitude API key were not found as literals; they appear to be supplied at runtime. The Happiness Meter client ID/secret also remain unresolved, but a strong UAE Pass `clientID` candidate (`dubainow_mobileapp_prod_v2`) and its scopes were recovered.
 - The Google Maps iOS API key is set in Swift code inside the encrypted `DubaiNow` binary and was not recoverable; the Android Maps key is listed in §2.
-- Native Android hardcoded secret **was** recovered from `classes7.dex` (see §2): the prayer-times `X-API-Key`.
+- Native Android hardcoded secret **was** recovered from `classes7.dex` (see §2): the prayer-times `X-API-Key`, plus the real APK signing certificate.
+- The iOS build ships a few assets the Android build does not (`banner_food_for_all.png`, extra RTA parking-test SVGs, `range_rover.svg`, `ic_parking*`, `pcfc_my_marine_license.svg`), indicating the iOS build is slightly ahead/divergent.
 </content>
