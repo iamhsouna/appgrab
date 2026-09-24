@@ -6,7 +6,9 @@
 #
 # Prefers `uv tool` (or pipx) for an isolated install, and falls back to
 # dropping the single self-bootstrapping appgrab.py into ~/.local/bin.
-# The install directory is added to PATH (set APPGRAB_NO_MODIFY_PATH=1 to skip).
+# The install directory is added to PATH (set APPGRAB_NO_MODIFY_PATH=1 to skip),
+# and all runtime dependencies (apkeep, ipatool, Python env) are installed
+# (set APPGRAB_SKIP_DEPS=1 to skip).
 
 set -euo pipefail
 
@@ -68,7 +70,52 @@ persist_path() {
     fi
 }
 
+find_appgrab() {
+    # Locate the just-installed command, even if PATH isn't refreshed yet.
+    local candidate
+    if command -v appgrab >/dev/null 2>&1; then
+        printf '%s\n' "appgrab"
+        return 0
+    fi
+    for candidate in "$BIN_DIR/appgrab"; do
+        if [ -x "$candidate" ]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    if command -v uv >/dev/null 2>&1; then
+        local uv_bin
+        uv_bin="$(uv tool dir --bin 2>/dev/null || true)"
+        if [ -n "$uv_bin" ] && [ -x "$uv_bin/appgrab" ]; then
+            printf '%s\n' "$uv_bin/appgrab"
+            return 0
+        fi
+    fi
+    return 1
+}
+
+install_deps() {
+    # Install every runtime dependency (Python env, apkeep, ipatool).
+    if [ -n "${APPGRAB_SKIP_DEPS:-}" ]; then
+        say "Skipping dependency installation (APPGRAB_SKIP_DEPS set)."
+        return 0
+    fi
+    local cmd
+    if ! cmd="$(find_appgrab)"; then
+        warn "Could not locate the installed appgrab command; skipping dependencies."
+        return 0
+    fi
+    say "Installing runtime dependencies (Python env, apkeep, ipatool) ..."
+    if "$cmd" install-deps -y; then
+        ok "All dependencies installed."
+    else
+        warn "Dependency installation did not finish. Retry with: $cmd install-deps"
+        warn "AppGrab will also retry automatically on first use."
+    fi
+}
+
 finish() {
+    install_deps
     # Make sure the install location (and uv's bin dir) are on PATH, now and later.
     persist_path "$BIN_DIR"
     if command -v uv >/dev/null 2>&1; then

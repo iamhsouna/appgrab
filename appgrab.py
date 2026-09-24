@@ -28,7 +28,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-__version__ = "1.2.1"
+__version__ = "1.3.0"
 
 REPO_SLUG = os.environ.get("APPGRAB_REPO", "iamhsouna/appgrab")
 REPO_URL = f"https://github.com/{REPO_SLUG}"
@@ -422,26 +422,21 @@ def ipatool_strategies():
 
 
 def ensure_dependencies(platform_name="android"):
-    """Ensure all runtime dependencies are present for the chosen platform."""
+    """Ensure all runtime dependencies are present. Return True on success."""
     ensure_local_bin_on_path()
 
     if platform_name == "ios":
-        ok_install = install_tool(
+        return install_tool(
             "ipatool",
             lambda: shutil.which("ipatool") is not None,
             ipatool_strategies(),
             "https://github.com/majd/ipatool (brew install ipatool / go install ...)")
-        if not ok_install:
-            sys.exit(1)
-        return
 
-    ok_install = install_tool(
+    return install_tool(
         "apkeep",
         lambda: shutil.which("apkeep") is not None,
         apkeep_strategies(),
         "https://github.com/EFForg/apkeep (brew install apkeep / cargo install apkeep)")
-    if not ok_install:
-        sys.exit(1)
 
 
 # ---------- Config ----------
@@ -713,7 +708,8 @@ def cmd_search_ios(args):
         warn("Aborted.")
         return
 
-    ensure_dependencies("ios")
+    if not ensure_dependencies("ios"):
+        sys.exit(1)
     require_iap_auth()
     sys.exit(iap_download_bulk([r["appId"] for r in results], outdir,
                                args.parallel, purchase=args.purchase))
@@ -763,6 +759,31 @@ def cmd_download(args):
     source = args.source or cfg.get("source", "apk-pure")
     sys.exit(download_single(args.app_id, cfg, source, outdir,
                              args.parallel, fallback=args.fallback))
+
+
+def cmd_install_deps(args):
+    """Install every runtime dependency (Python env + apkeep + ipatool)."""
+    info(f"Installing all AppGrab dependencies (v{__version__}) ...")
+    bootstrap_python_env()
+
+    targets = []
+    if not getattr(args, "ios_only", False):
+        targets.append("android")
+    if not getattr(args, "android_only", False):
+        targets.append("ios")
+
+    failed = []
+    for name in targets:
+        label = "apkeep (Android)" if name == "android" else "ipatool (iOS)"
+        info(f"Ensuring {label} ...")
+        if not ensure_dependencies(name):
+            failed.append(label)
+
+    if failed:
+        err(f"Could not install: {', '.join(failed)}")
+        return 1
+    ok("All dependencies are installed.")
+    return 0
 
 
 # ---------- Update ----------
@@ -950,6 +971,15 @@ def main():
     sp.add_argument("-r", "--parallel", type=int, default=4)
     sp.set_defaults(func=cmd_download)
 
+    sp = sub.add_parser("install-deps",
+                        help="Install all runtime dependencies (Python env, apkeep, ipatool)")
+    sp.add_argument("--android-only", action="store_true",
+                    help="Only install Android dependencies (apkeep)")
+    sp.add_argument("--ios-only", action="store_true",
+                    help="Only install iOS dependencies (ipatool)")
+    add_yes(sp)
+    sp.set_defaults(func=cmd_install_deps)
+
     sp = sub.add_parser("update", help="Update AppGrab to the latest version")
     sp.add_argument("--check", action="store_true", help="Only report whether an update is available")
     sp.set_defaults(func=cmd_update)
@@ -959,11 +989,12 @@ def main():
         global ASSUME_YES
         if getattr(args, "yes", False):
             ASSUME_YES = True
-        if args.cmd != "update":
+        if args.cmd not in ("update", "install-deps"):
             platform = getattr(args, "platform", "android")
             ios_search = platform == "ios" and args.cmd == "search"
             if not ios_search:
-                ensure_dependencies(platform)
+                if not ensure_dependencies(platform):
+                    sys.exit(1)
         sys.exit(args.func(args) or 0)
     except KeyboardInterrupt:
         print()

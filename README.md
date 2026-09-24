@@ -24,7 +24,7 @@ Download all 10 apps to '.'? [y/N] y
 - **Search or direct download** — search a store and bulk-grab every result, or download a single app by id.
 - **Automatic fallback** — if the Google Play / APKPure source can't provide an app (missing there, geo-restricted, or no credentials), AppGrab retries it from Huawei AppGallery.
 - **Cross-platform** — works on **macOS**, **Ubuntu/Debian**, **Arch Linux** (and other `brew` / `apt` / `pacman` / `dnf` / `zypper` distros).
-- **Zero setup** — missing dependencies are detected and installed on first run *with your permission*.
+- **Zero setup** — the installer installs `apkeep`, `ipatool` and the Python env up front; anything still missing is detected and installed on first run *with your permission*. Re-run anytime with `appgrab install-deps`.
 - **`uv` or `venv`** — uses [PEP 723](https://peps.python.org/pep-0723/) inline metadata with `uv`, and falls back to a private virtualenv if `uv` isn't installed.
 - **No auth for free sources** — Android defaults to APKPure; iOS only needs your own App Store account login.
 - **Pretty output** — colored, script-friendly progress, and `Ctrl+C` exits cleanly without a traceback.
@@ -71,6 +71,19 @@ Then run `appgrab --help`. The installer prefers an isolated [`uv`](https://docs
 tool install, falls back to `pipx`, then to dropping the single script in
 `~/.local/bin`.
 
+The installer also **adds `~/.local/bin` to your `PATH`** (in your shell's
+profile) and **installs every runtime dependency up front** — the Python env
+with `google-play-scraper`, plus `apkeep` and `ipatool` — so the tools are ready
+immediately. Set `APPGRAB_NO_MODIFY_PATH=1` to skip the `PATH` edit or
+`APPGRAB_SKIP_DEPS=1` to skip the dependency install. You can install (or repair)
+dependencies at any time:
+
+```bash
+appgrab install-deps                # both platforms
+appgrab install-deps --android-only # only apkeep
+appgrab install-deps --ios-only     # only ipatool
+```
+
 > **Private repo?** `raw.githubusercontent.com` needs a token. Use the `uv` one-liner
 > below instead (Git uses your stored credentials), or run
 > `gh api repos/iamhsouna/appgrab/contents/install.sh -H "Accept: application/vnd.github.raw" | bash`.
@@ -101,10 +114,11 @@ uv run appgrab.py --help
 appgrab <command> [options]
 
 Commands:
-  setup      Configure credentials (Google Play AAS token or App Store login)
-  search     Search a store and download all results
-  download   Download a single app by bundle/app id
-  update     Update AppGrab to the latest version
+  setup         Configure credentials (Google Play AAS token or App Store login)
+  search        Search a store and download all results
+  download      Download a single app by bundle/app id
+  install-deps  Install all runtime dependencies (Python env, apkeep, ipatool)
+  update        Update AppGrab to the latest version
 ```
 
 Common options:
