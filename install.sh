@@ -6,16 +6,85 @@
 #
 # Prefers `uv tool` (or pipx) for an isolated install, and falls back to
 # dropping the single self-bootstrapping appgrab.py into ~/.local/bin.
+# The install directory is added to PATH (set APPGRAB_NO_MODIFY_PATH=1 to skip).
 
 set -euo pipefail
 
 REPO="${APPGRAB_REPO:-iamhsouna/appgrab}"
 REF="${APPGRAB_REF:-main}"
 BIN_DIR="${APPGRAB_BIN:-$HOME/.local/bin}"
+NO_MODIFY_PATH="${APPGRAB_NO_MODIFY_PATH:-}"
+PATH_MARKER="# Added by AppGrab installer"
 
 say() { printf '\033[36m→ %s\033[0m\n' "$1"; }
 ok()  { printf '\033[32m✓ %s\033[0m\n' "$1"; }
 die() { printf '\033[31m✗ %s\033[0m\n' "$1" >&2; exit 1; }
+
+# ---------- PATH handling ----------
+path_contains() {
+    case ":$PATH:" in
+        *":$1:"*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+shell_profile() {
+    # Pick the startup file the user's login shell actually reads.
+    case "$(basename "${SHELL:-sh}")" in
+        zsh)
+            if [ -f "$HOME/.zshrc" ]; then printf '%s\n' "$HOME/.zshrc"
+            elif [ -f "$HOME/.zprofile" ]; then printf '%s\n' "$HOME/.zprofile"
+            else printf '%s\n' "$HOME/.zshenv"; fi
+            ;;
+        bash)
+            if [ -f "$HOME/.bashrc" ]; then printf '%s\n' "$HOME/.bashrc"
+            elif [ -f "$HOME/.bash_profile" ]; then printf '%s\n' "$HOME/.bash_profile"
+            else printf '%s\n' "$HOME/.profile"; fi
+            ;;
+        *) printf '%s\n' "$HOME/.profile" ;;
+    esac
+}
+
+persist_path() {
+    # Append an export line to the user's shell profile, idempotently.
+    local dir="$1" file line
+    if path_contains "$dir"; then
+        return 0
+    fi
+    if [ -n "$NO_MODIFY_PATH" ]; then
+        printf '\033[33m! Add to your PATH: export PATH="%s:$PATH"\033[0m\n' "$dir"
+        return 0
+    fi
+    file="$(shell_profile)"
+    if [ -f "$file" ] && grep -qF "$dir" "$file"; then
+        say "$dir is already referenced in $file"
+        return 0
+    fi
+    line="export PATH=\"$dir:\$PATH\""
+    if printf '\n%s\n%s\n' "$PATH_MARKER" "$line" >> "$file"; then
+        say "Added $dir to PATH in $file"
+    else
+        printf '\033[33m! Could not update %s. Add to your PATH: %s\033[0m\n' "$file" "$line"
+    fi
+}
+
+finish() {
+    # Make sure the install location (and uv's bin dir) are on PATH, now and later.
+    persist_path "$BIN_DIR"
+    if command -v uv >/dev/null 2>&1; then
+        local uv_bin
+        uv_bin="$(uv tool dir --bin 2>/dev/null || true)"
+        if [ -n "$uv_bin" ] && [ "$uv_bin" != "$BIN_DIR" ]; then
+            persist_path "$uv_bin"
+        fi
+    fi
+    if path_contains "$BIN_DIR"; then
+        ok "Run: appgrab --help"
+    else
+        ok "Run: appgrab --help"
+        say "Open a new terminal (or 'source $(shell_profile)') to refresh your PATH."
+    fi
+}
 
 # Directory of this script, if we're running from a checkout.
 SELF_DIR=""
@@ -32,7 +101,7 @@ if command -v uv >/dev/null 2>&1; then
         say "Installing AppGrab with uv ..."
         uv tool install --force "git+https://github.com/${REPO}.git@${REF}"
     fi
-    ok "Installed. Run: appgrab --help"
+    finish
     exit 0
 fi
 
@@ -45,7 +114,7 @@ if command -v pipx >/dev/null 2>&1; then
         say "Installing AppGrab with pipx ..."
         pipx install --force "git+https://github.com/${REPO}.git@${REF}"
     fi
-    ok "Installed. Run: appgrab --help"
+    finish
     exit 0
 fi
 
@@ -73,8 +142,4 @@ fi
 chmod +x "$BIN_DIR/appgrab"
 ok "Installed to $BIN_DIR/appgrab"
 
-case ":$PATH:" in
-    *":$BIN_DIR:"*) ;;
-    *) printf '\033[33m! Add to your PATH: export PATH="%s:$PATH"\033[0m\n' "$BIN_DIR" ;;
-esac
-ok "Run: appgrab --help"
+finish
